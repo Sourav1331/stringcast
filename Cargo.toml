@@ -23,3 +23,11 @@ enigo = "0.2"
 rdev = "0.5"
 directories = "5"
 keyring = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }

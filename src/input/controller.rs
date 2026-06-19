@@ -1,9 +1,10 @@
 use super::{InputEvent, KeystrokeBuffer, SyntheticInputGuard};
+use crate::detection::DYNAMIC_DEBOUNCE_MS;
 use crate::extraction::TextExtractor;
 use crate::pipeline::{PipelineError, PipelineOutcome, TextTransformer, TransformationPipeline};
 use crate::platform::{ForegroundAppProvider, OperationGate};
 use crate::replacement::TextReplacer;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputControllerOutcome {
@@ -30,6 +31,7 @@ pub struct InputController<E, T, R, P> {
     foreground_provider: P,
     gate: OperationGate,
     synthetic_guard: SyntheticInputGuard,
+    pending_dynamic_deadline: Option<Instant>,
 }
 
 impl<E, T, R, P> InputController<E, T, R, P>
@@ -51,6 +53,7 @@ where
             foreground_provider,
             gate,
             synthetic_guard,
+            pending_dynamic_deadline: None,
         }
     }
 
@@ -72,26 +75,38 @@ where
                     &self.gate,
                 )?;
                 match outcome {
-                    PipelineOutcome::NoMatch => Ok(InputControllerOutcome::BufferUpdated(
-                        self.buffer.as_str().to_string(),
-                    )),
-                    PipelineOutcome::PendingDynamic => Ok(InputControllerOutcome::Pipeline(
-                        PipelineOutcome::PendingDynamic,
-                    )),
+                    PipelineOutcome::NoMatch => {
+                        self.pending_dynamic_deadline = None;
+                        Ok(InputControllerOutcome::BufferUpdated(
+                            self.buffer.as_str().to_string(),
+                        ))
+                    }
+                    PipelineOutcome::PendingDynamic => {
+                        self.pending_dynamic_deadline =
+                            Some(now + Duration::from_millis(DYNAMIC_DEBOUNCE_MS));
+                        Ok(InputControllerOutcome::Pipeline(
+                            PipelineOutcome::PendingDynamic,
+                        ))
+                    }
                     PipelineOutcome::Blocked(decision) => {
-                        self.buffer.clear();
+                        self.clear_buffer_and_pending();
                         Ok(InputControllerOutcome::Pipeline(PipelineOutcome::Blocked(
                             decision,
                         )))
                     }
                     PipelineOutcome::Replaced { .. } => {
-                        self.buffer.clear();
+                        self.clear_buffer_and_pending();
                         Ok(InputControllerOutcome::Pipeline(outcome))
                     }
                 }
             }
             InputEvent::Backspace => {
+                let rearm_pending_dynamic = self.pending_dynamic_deadline.is_some();
                 self.buffer.backspace();
+                if rearm_pending_dynamic {
+                    self.pending_dynamic_deadline =
+                        Some(now + Duration::from_millis(DYNAMIC_DEBOUNCE_MS));
+                }
                 Ok(InputControllerOutcome::BufferUpdated(
                     self.buffer.as_str().to_string(),
                 ))
@@ -105,10 +120,54 @@ where
             | InputEvent::Shortcut(_)
             | InputEvent::FocusChanged
             | InputEvent::SleepOrLock => {
-                self.buffer.clear();
+                self.clear_buffer_and_pending();
                 Ok(InputControllerOutcome::BufferCleared)
             }
         }
+    }
+
+    pub fn handle_pending_timeout(
+        &mut self,
+        now: Instant,
+    ) -> Result<InputControllerOutcome, InputControllerError> {
+        let Some(deadline) = self.pending_dynamic_deadline else {
+            return Ok(InputControllerOutcome::BufferUpdated(
+                self.buffer.as_str().to_string(),
+            ));
+        };
+
+        if now < deadline {
+            return Ok(InputControllerOutcome::BufferUpdated(
+                self.buffer.as_str().to_string(),
+            ));
+        }
+
+        self.pending_dynamic_deadline = None;
+        let outcome = self.pipeline.finalize_pending_foreground_buffer(
+            self.buffer.as_str(),
+            &mut self.foreground_provider,
+            &self.gate,
+        )?;
+
+        match outcome {
+            PipelineOutcome::NoMatch | PipelineOutcome::PendingDynamic => Ok(
+                InputControllerOutcome::BufferUpdated(self.buffer.as_str().to_string()),
+            ),
+            PipelineOutcome::Blocked(decision) => {
+                self.clear_buffer_and_pending();
+                Ok(InputControllerOutcome::Pipeline(PipelineOutcome::Blocked(
+                    decision,
+                )))
+            }
+            PipelineOutcome::Replaced { .. } => {
+                self.clear_buffer_and_pending();
+                Ok(InputControllerOutcome::Pipeline(outcome))
+            }
+        }
+    }
+
+    pub fn pending_dynamic_deadline(&self) -> Option<Instant> {
+        self.pending_dynamic_deadline
     }
 
     pub fn buffer(&self) -> &str {
@@ -118,12 +177,18 @@ where
     pub fn into_parts(self) -> (TransformationPipeline<E, T, R>, P) {
         (self.pipeline, self.foreground_provider)
     }
+
+    fn clear_buffer_and_pending(&mut self) {
+        self.buffer.clear();
+        self.pending_dynamic_deadline = None;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::commands::{CommandDefinition, CommandRegistry};
+    use crate::detection::DYNAMIC_DEBOUNCE_MS;
     use crate::extraction::BufferTextExtractor;
     use crate::platform::{
         ExclusionMatcher, ForegroundApp, OperationGate, StaticForegroundAppProvider,
@@ -193,6 +258,69 @@ mod tests {
             InputControllerOutcome::Pipeline(PipelineOutcome::Replaced { .. })
         ));
         assert_eq!(controller.buffer(), "");
+    }
+
+    #[test]
+    fn pending_dynamic_trigger_replaces_after_debounce() {
+        let now = Instant::now();
+        let mut controller = controller();
+
+        let first = controller
+            .handle_event(
+                InputEvent::Text("hello ?ask:make this warmer".to_string()),
+                now,
+            )
+            .unwrap();
+
+        assert_eq!(
+            first,
+            InputControllerOutcome::Pipeline(PipelineOutcome::PendingDynamic)
+        );
+        assert!(controller.pending_dynamic_deadline().is_some());
+
+        let outcome = controller
+            .handle_pending_timeout(now + Duration::from_millis(DYNAMIC_DEBOUNCE_MS + 1))
+            .unwrap();
+
+        assert!(matches!(
+            outcome,
+            InputControllerOutcome::Pipeline(PipelineOutcome::Replaced { .. })
+        ));
+        assert_eq!(controller.buffer(), "");
+    }
+
+    #[test]
+    fn backspace_extends_pending_dynamic_debounce() {
+        let now = Instant::now();
+        let mut controller = controller();
+
+        controller
+            .handle_event(
+                InputEvent::Text("hello ?ask:make this warmer".to_string()),
+                now,
+            )
+            .unwrap();
+        let original_deadline = controller.pending_dynamic_deadline().unwrap();
+
+        controller
+            .handle_event(InputEvent::Backspace, now + Duration::from_millis(100))
+            .unwrap();
+        let updated_deadline = controller.pending_dynamic_deadline().unwrap();
+
+        assert!(updated_deadline > original_deadline);
+
+        let early = controller
+            .handle_pending_timeout(original_deadline + Duration::from_millis(1))
+            .unwrap();
+        assert!(matches!(early, InputControllerOutcome::BufferUpdated(_)));
+
+        let final_outcome = controller
+            .handle_pending_timeout(updated_deadline + Duration::from_millis(1))
+            .unwrap();
+        assert!(matches!(
+            final_outcome,
+            InputControllerOutcome::Pipeline(PipelineOutcome::Replaced { .. })
+        ));
     }
 
     #[test]

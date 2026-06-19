@@ -130,7 +130,7 @@ where
                 extractor,
                 transformer,
                 replacer,
-                "[Stringcast working...]",
+                "[...]",
             )
         } else {
             TransformationPipeline::new(plan.registry, extractor, transformer, replacer)
@@ -152,6 +152,17 @@ where
         now: Instant,
     ) -> Result<crate::input::InputControllerOutcome, InputControllerError> {
         self.controller.handle_event(event, now)
+    }
+
+    pub fn handle_pending_timeout(
+        &mut self,
+        now: Instant,
+    ) -> Result<crate::input::InputControllerOutcome, InputControllerError> {
+        self.controller.handle_pending_timeout(now)
+    }
+
+    pub fn pending_dynamic_deadline(&self) -> Option<Instant> {
+        self.controller.pending_dynamic_deadline()
     }
 
     pub fn buffer(&self) -> &str {

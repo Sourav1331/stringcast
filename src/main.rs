@@ -1,5 +1,7 @@
 use std::env;
 use std::path::Path;
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use stringcast::api::{
@@ -10,6 +12,8 @@ use stringcast::input::{InputControllerOutcome, InputEvent, InputHook, RdevInput
 use stringcast::platform::{PermissionChecker, SystemPermissionChecker};
 use stringcast::runtime::StringcastRuntime;
 use stringcast::storage::{config_file_path, ApiKeyConfig, AppConfig, KeyringKeyMaterialStore};
+
+const INPUT_EVENT_QUEUE_CAPACITY: usize = 1024;
 
 fn main() {
     if let Err(error) = run() {
@@ -61,27 +65,71 @@ fn run() -> Result<(), String> {
 
     let mut hook = input_hook();
     let log_events = log_events();
+    let (event_sender, event_receiver) = mpsc::sync_channel(INPUT_EVENT_QUEUE_CAPACITY);
+    let worker_log_events = log_events;
+    let _input_worker = thread::spawn(move || loop {
+        let received = match runtime.pending_dynamic_deadline() {
+            Some(deadline) => {
+                let timeout = deadline.saturating_duration_since(Instant::now());
+                match event_receiver.recv_timeout(timeout) {
+                    Ok(received) => received,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        log_runtime_outcome(
+                            runtime.handle_pending_timeout(Instant::now()),
+                            worker_log_events,
+                        );
+                        continue;
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            None => match event_receiver.recv() {
+                Ok(received) => received,
+                Err(_) => break,
+            },
+        };
+
+        let (event, received_at) = received;
+        log_runtime_outcome(runtime.handle_event(event, received_at), worker_log_events);
+    });
+
     hook.run(move |event| {
+        let received_at = Instant::now();
         if log_events {
             eprintln!("Stringcast input event: {}", describe_input_event(&event));
         }
 
-        let outcome = runtime.handle_event(event, Instant::now());
-
-        match outcome {
-            Ok(outcome) if log_events => {
-                eprintln!(
-                    "Stringcast input outcome: {}",
-                    describe_input_outcome(&outcome)
-                );
+        match event_sender.try_send((event, received_at)) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) => {
+                if log_events {
+                    eprintln!("Stringcast event dropped: input worker queue full");
+                }
             }
-            Ok(_) => {}
-            Err(error) => {
-                eprintln!("Stringcast event error: {error:?}");
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                eprintln!("Stringcast event error: input worker stopped");
             }
         }
     })
     .map_err(|error| format!("input hook error: {error:?}"))
+}
+
+fn log_runtime_outcome(
+    outcome: Result<InputControllerOutcome, stringcast::input::InputControllerError>,
+    log_events: bool,
+) {
+    match outcome {
+        Ok(outcome) if log_events => {
+            eprintln!(
+                "Stringcast input outcome: {}",
+                describe_input_outcome(&outcome)
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("Stringcast event error: {error:?}");
+        }
+    }
 }
 
 fn input_hook() -> RdevInputHook {

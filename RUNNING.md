@@ -190,6 +190,7 @@ See [docs/WAYLAND_POC.md](docs/WAYLAND_POC.md) before using it. It reads keyboar
 ## 10) Notes
 - This repo uses select-all + clipboard to read active-field text. The app restores the clipboard after each operation.
 - For development, `cargo run -- run` is easiest; for production, prefer `cargo build --release` and run the release binary.
+- For Windows-specific setup, installation, usage, and troubleshooting, see [docs/WINDOWS.md](docs/WINDOWS.md).
 
 ---
 For architecture details and behavioral specs, see [SPEC.md](SPEC.md).

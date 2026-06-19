@@ -12,6 +12,7 @@ pub trait InputSimulator {
     fn copy(&mut self) -> Result<(), InputSimulationError>;
     fn paste(&mut self) -> Result<(), InputSimulationError>;
     fn type_text(&mut self, text: &str) -> Result<(), InputSimulationError>;
+    fn collapse_selection(&mut self) -> Result<(), InputSimulationError>;
 }
 
 #[derive(Debug)]
@@ -53,6 +54,11 @@ where
         let _token = self.guard.acquire(Instant::now());
         self.inner.type_text(text)
     }
+
+    fn collapse_selection(&mut self) -> Result<(), InputSimulationError> {
+        let _token = self.guard.acquire(Instant::now());
+        self.inner.collapse_selection()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +67,7 @@ pub enum RecordedInputAction {
     Copy,
     Paste,
     TypeText(String),
+    CollapseSelection,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -87,6 +94,11 @@ impl InputSimulator for RecordingInputSimulator {
     fn type_text(&mut self, text: &str) -> Result<(), InputSimulationError> {
         self.actions
             .push(RecordedInputAction::TypeText(text.to_string()));
+        Ok(())
+    }
+
+    fn collapse_selection(&mut self) -> Result<(), InputSimulationError> {
+        self.actions.push(RecordedInputAction::CollapseSelection);
         Ok(())
     }
 }
@@ -141,6 +153,14 @@ impl InputSimulator for EnigoInputSimulator {
 
         self.enigo
             .text(text)
+            .map_err(|_| InputSimulationError::Unavailable)
+    }
+
+    fn collapse_selection(&mut self) -> Result<(), InputSimulationError> {
+        use enigo::{Direction, Keyboard};
+
+        self.enigo
+            .key(enigo::Key::RightArrow, Direction::Click)
             .map_err(|_| InputSimulationError::Unavailable)
     }
 }

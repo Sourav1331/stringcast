@@ -1,5 +1,5 @@
 use crate::commands::{CommandDefinition, CommandRegistry};
-use crate::detection::{detect_trigger, DetectionDecision, TriggerMatch};
+use crate::detection::{detect_trigger, finalize_pending_dynamic, DetectionDecision, TriggerMatch};
 use crate::extraction::{ExtractionContext, ExtractionError, TextExtractor};
 use crate::orchestrator::{OperationOrchestrator, OrchestratorError};
 use crate::platform::{
@@ -130,6 +130,21 @@ where
         }
     }
 
+    pub fn finalize_pending_buffer(
+        &mut self,
+        buffer: &str,
+        app_id: impl Into<String>,
+        window_id: Option<String>,
+    ) -> Result<PipelineOutcome, PipelineError> {
+        match finalize_pending_dynamic(buffer) {
+            DetectionDecision::NoMatch => Ok(PipelineOutcome::NoMatch),
+            DetectionDecision::PendingDynamic(_) => Ok(PipelineOutcome::PendingDynamic),
+            DetectionDecision::Matched(trigger_match) => {
+                self.execute_match(trigger_match, app_id.into(), window_id)
+            }
+        }
+    }
+
     pub fn process_foreground_buffer<P>(
         &mut self,
         buffer: &str,
@@ -146,6 +161,24 @@ where
         }
 
         self.process_buffer(buffer, app.app_id, app.window_id)
+    }
+
+    pub fn finalize_pending_foreground_buffer<P>(
+        &mut self,
+        buffer: &str,
+        provider: &mut P,
+        gate: &OperationGate,
+    ) -> Result<PipelineOutcome, PipelineError>
+    where
+        P: ForegroundAppProvider,
+    {
+        let app = provider.foreground_app()?;
+        let decision = gate.evaluate(&app);
+        if decision != OperationGateDecision::Allow {
+            return Ok(PipelineOutcome::Blocked(decision));
+        }
+
+        self.finalize_pending_buffer(buffer, app.app_id, app.window_id)
     }
 
     pub fn into_parts(self) -> (OperationOrchestrator, E, T, R) {
@@ -354,6 +387,34 @@ mod tests {
         assert_eq!(outcome, PipelineOutcome::PendingDynamic);
         assert!(transformer.calls.is_empty());
         assert!(replacer.replacements.is_empty());
+    }
+
+    #[test]
+    fn pipeline_finalizes_pending_dynamic_trigger() {
+        let mut pipeline = TransformationPipeline::new(
+            CommandRegistry::new(),
+            BufferTextExtractor,
+            FakeTransformer {
+                output: Ok("Hola".to_string()),
+                calls: vec![],
+            },
+            NoopTextReplacer::default(),
+        );
+
+        let outcome = pipeline
+            .finalize_pending_buffer("hello ?translate:es", "com.example.App", None)
+            .unwrap();
+        let (_, _, transformer, replacer) = pipeline.into_parts();
+
+        assert_eq!(
+            outcome,
+            PipelineOutcome::Replaced {
+                trigger_text: "?translate:es".to_string(),
+                replacement_text: "Hola".to_string()
+            }
+        );
+        assert_eq!(transformer.calls.len(), 1);
+        assert_eq!(replacer.replacements[0].1, "Hola");
     }
 
     #[test]

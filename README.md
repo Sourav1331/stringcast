@@ -121,6 +121,7 @@ sudo apt install build-essential pkg-config libdbus-1-dev libxdo-dev libx11-dev 
 ## Documentation
 
 - [RUNNING.md](RUNNING.md): developer/local run instructions.
+- [docs/WINDOWS.md](docs/WINDOWS.md): Windows setup, installation, usage, and troubleshooting.
 - [docs/RELEASES.md](docs/RELEASES.md): downloadable artifact instructions.
 - [docs/MACOS_APP.md](docs/MACOS_APP.md): macOS app wrapper notes.
 - [SPEC.md](SPEC.md): product and architecture spec.

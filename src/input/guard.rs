@@ -61,7 +61,7 @@ impl SyntheticInputGuard {
     pub fn is_suppressed(&self, now: Instant) -> bool {
         let mut state = self.inner.lock().expect("synthetic input guard poisoned");
         if let (Some(active_since), Some(_)) = (state.active_since, state.active_operation_id) {
-            if now.duration_since(active_since) > self.watchdog_timeout {
+            if now.saturating_duration_since(active_since) > self.watchdog_timeout {
                 state.active_operation_id = None;
                 state.active_since = None;
                 state.suppress_until = Some(now + self.grace_window);
@@ -111,5 +111,15 @@ mod tests {
         std::mem::forget(token);
 
         assert!(guard.is_suppressed(now + Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn future_active_since_does_not_panic() {
+        let guard = SyntheticInputGuard::default();
+        let now = Instant::now();
+        let token = guard.acquire(now + Duration::from_millis(1));
+
+        assert!(guard.is_suppressed(now));
+        drop(token);
     }
 }

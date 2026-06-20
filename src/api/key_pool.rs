@@ -48,7 +48,7 @@ impl KeyPool {
             .filter(|(_, key)| key.provider == provider && key.status == KeyStatus::Active)
             .min_by_key(|(_, key)| {
                 key.last_used
-                    .unwrap_or(Instant::now() - Duration::from_secs(86_400))
+                    .unwrap_or(now.checked_sub(Duration::from_secs(86_400)).unwrap_or(now))
             })
             .map(|(index, _)| index)?;
 
@@ -183,6 +183,16 @@ mod tests {
         let selected = pool.next_available_key(ProviderKind::Gemini, now).unwrap();
 
         assert_eq!(selected.id, "old");
+    }
+
+    #[test]
+    fn picks_never_used_key_without_underflowing_early_instant() {
+        let now = Instant::now();
+        let mut pool = KeyPool::new(vec![key("new", ProviderKind::Gemini, None)]);
+
+        let selected = pool.next_available_key(ProviderKind::Gemini, now).unwrap();
+
+        assert_eq!(selected.id, "new");
     }
 
     #[test]

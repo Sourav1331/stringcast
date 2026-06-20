@@ -36,16 +36,14 @@ pub fn finalize_pending_dynamic(buffer: &str) -> DetectionDecision {
 }
 
 fn detect_static(buffer: &str, registry: &CommandRegistry) -> Option<TriggerMatch> {
+    let trimmed_buffer = buffer.trim_end();
     for trigger in registry.static_triggers_longest_first() {
-        if !ends_with_trigger(buffer, &trigger) {
+        if !ends_with_trigger(trimmed_buffer, &trigger) {
             continue;
         }
 
-        let content_end = buffer.len() - trigger.len();
-        let transform_input = buffer[..content_end].trim_end().to_string();
-        if transform_input.is_empty() {
-            return None;
-        }
+        let content_end = trimmed_buffer.len() - trigger.len();
+        let transform_input = trimmed_buffer[..content_end].trim_end().to_string();
 
         let command = registry.resolve_static(&trigger)?;
         return Some(TriggerMatch {
@@ -64,9 +62,6 @@ fn detect_dynamic(buffer: &str, finalize: bool) -> DetectionDecision {
     };
 
     let transform_input = buffer[..prefix_start].trim_end().to_string();
-    if transform_input.is_empty() {
-        return DetectionDecision::NoMatch;
-    }
 
     let parameter = &buffer[prefix_start + prefix.len()..];
     match prefix {
@@ -214,6 +209,65 @@ mod tests {
     }
 
     #[test]
+    fn detects_static_trigger_without_recent_buffer_prefix() {
+        let registry = CommandRegistry::new();
+        let decision = detect_trigger(" ?casual", &registry);
+
+        let DetectionDecision::Matched(matched) = decision else {
+            panic!("expected static match");
+        };
+
+        assert_eq!(matched.trigger_text, "?casual");
+        assert_eq!(matched.transform_input, "");
+        assert_eq!(
+            matched.command.kind,
+            CommandKind::BuiltIn(BuiltInCommand::Casual)
+        );
+    }
+
+    #[test]
+    fn detects_static_trigger_with_trailing_space() {
+        let registry = CommandRegistry::new();
+        let decision = detect_trigger("existing text ?formal ", &registry);
+
+        let DetectionDecision::Matched(matched) = decision else {
+            panic!("expected static match");
+        };
+
+        assert_eq!(matched.trigger_text, "?formal");
+        assert_eq!(matched.transform_input, "existing text");
+        assert_eq!(
+            matched.command.kind,
+            CommandKind::BuiltIn(BuiltInCommand::Formal)
+        );
+    }
+
+    #[test]
+    fn detects_every_builtin_without_recent_buffer_prefix() {
+        let registry = CommandRegistry::new();
+        let triggers = [
+            "?fix",
+            "?improve",
+            "?shorten",
+            "?expand",
+            "?formal",
+            "?casual",
+            "?emoji",
+            "?reply",
+            "?bullets",
+            "?summarize",
+        ];
+
+        for trigger in triggers {
+            let decision = detect_trigger(&format!(" {trigger}"), &registry);
+            assert!(
+                matches!(decision, DetectionDecision::Matched(_)),
+                "expected {trigger} to match"
+            );
+        }
+    }
+
+    #[test]
     fn escaped_static_trigger_does_not_match() {
         let registry = CommandRegistry::new();
         let decision = detect_trigger(r"literal \?fix", &registry);
@@ -243,6 +297,31 @@ mod tests {
             matched.command.kind,
             CommandKind::Dynamic(DynamicCommand::Translate {
                 lang_code: "es".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn translate_can_wait_without_recent_buffer_prefix() {
+        let registry = CommandRegistry::new();
+        let decision = detect_trigger(" ?translate:hi", &registry);
+
+        assert!(matches!(decision, DetectionDecision::PendingDynamic(_)));
+    }
+
+    #[test]
+    fn finalized_ask_can_match_without_recent_buffer_prefix() {
+        let decision = finalize_pending_dynamic(" ?ask:make it casual");
+
+        let DetectionDecision::Matched(matched) = decision else {
+            panic!("expected finalized ask match");
+        };
+
+        assert_eq!(matched.transform_input, "");
+        assert_eq!(
+            matched.command.kind,
+            CommandKind::Dynamic(DynamicCommand::Ask {
+                question: "make it casual".to_string()
             })
         );
     }

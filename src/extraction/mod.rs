@@ -170,12 +170,7 @@ fn transform_input_from_snapshot(
     }
 
     let input_end = trimmed.len() - trigger_text.len();
-    let transform_input = trimmed[..input_end].trim_end().to_string();
-    if transform_input.is_empty() {
-        return Err(ExtractionError::TriggerMissingFromSnapshot);
-    }
-
-    Ok(transform_input)
+    Ok(trimmed[..input_end].trim_end().to_string())
 }
 
 impl From<ClipboardError> for ExtractionError {
@@ -280,6 +275,19 @@ mod tests {
                 RecordedInputAction::CollapseSelection
             ]
         );
+    }
+
+    #[test]
+    fn clipboard_extractor_accepts_trigger_without_input_text() {
+        let clipboard = MemoryClipboard::new(Some("?fix".to_string()));
+        let input = RecordingInputSimulator::default();
+        let mut extractor = ClipboardTextExtractor::new(clipboard, input);
+
+        let snapshot = extractor.extract(context()).unwrap();
+
+        assert_eq!(snapshot.extracted_text, "?fix");
+        assert_eq!(snapshot.replacement_target_text, "?fix");
+        assert_eq!(snapshot.transform_input, "");
     }
 
     #[test]

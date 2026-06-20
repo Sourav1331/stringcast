@@ -1,4 +1,4 @@
-use crate::commands::{CommandDefinition, CommandRegistry};
+use crate::commands::{CommandDefinition, CommandKind, CommandRegistry};
 use crate::detection::{detect_trigger, finalize_pending_dynamic, DetectionDecision, TriggerMatch};
 use crate::extraction::{ExtractionContext, ExtractionError, TextExtractor};
 use crate::orchestrator::{OperationOrchestrator, OrchestratorError};
@@ -209,6 +209,14 @@ where
                 return Err(PipelineError::Extraction(error));
             }
         };
+
+        if command_requires_input(&trigger_match.command)
+            && snapshot.transform_input.trim().is_empty()
+        {
+            self.orchestrator.fail();
+            return Ok(PipelineOutcome::NoMatch);
+        }
+
         if let Err(error) = self.orchestrator.complete_extraction(snapshot.clone()) {
             self.orchestrator.fail();
             return Err(PipelineError::Orchestrator(error));
@@ -291,6 +299,15 @@ where
             );
         }
     }
+}
+
+fn command_requires_input(command: &CommandDefinition) -> bool {
+    matches!(
+        &command.kind,
+        CommandKind::BuiltIn(_)
+            | CommandKind::Custom
+            | CommandKind::Dynamic(crate::commands::DynamicCommand::Translate { .. })
+    )
 }
 
 #[cfg(test)]
@@ -436,6 +453,28 @@ mod tests {
             result,
             Err(PipelineError::Transform(TransformError::ProviderRejected))
         );
+        assert!(replacer.replacements.is_empty());
+    }
+
+    #[test]
+    fn builtin_trigger_without_input_does_not_call_transformer() {
+        let mut pipeline = TransformationPipeline::new(
+            CommandRegistry::new(),
+            BufferTextExtractor,
+            FakeTransformer {
+                output: Ok("unused".to_string()),
+                calls: vec![],
+            },
+            NoopTextReplacer::default(),
+        );
+
+        let outcome = pipeline
+            .process_buffer(" ?fix", "com.example.App", None)
+            .unwrap();
+        let (_, _, transformer, replacer) = pipeline.into_parts();
+
+        assert_eq!(outcome, PipelineOutcome::NoMatch);
+        assert!(transformer.calls.is_empty());
         assert!(replacer.replacements.is_empty());
     }
 
